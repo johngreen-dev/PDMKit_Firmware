@@ -1,0 +1,20 @@
+# ESP-IDF build output
+build/
+
+# Generated SDK config (remove comment to ignore — track if you want reproducible builds)
+# sdkconfig
+
+# ESP-IDF managed components
+managed_components/
+dependencies.lock
+
+# Python
+*.pyc
+__pycache__/
+
+# VS Code logs
+.vscode/*.log
+
+# OS
+.DS_Store
+Thumbs.db
