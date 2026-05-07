@@ -4,6 +4,7 @@
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_log.h"
+#include "storage.h"
 
 static const char *TAG = "hello_world";
 
@@ -29,6 +30,23 @@ void app_main(void)
     //     ESP_LOGI(TAG, "Count: %d", count++);
     //     vTaskDelay(pdMS_TO_TICKS(1000));
     // }
+
+    ESP_ERROR_CHECK(storage_init());
+
+    ESP_ERROR_CHECK(store_int("storage",  "boot_count",  42));
+    ESP_ERROR_CHECK(store_bool("storage", "debug_mode",  true));
+    ESP_ERROR_CHECK(store_str("storage",  "device_name", "esp32-p4-dev"));
+
+    int32_t boot_count = 0;
+    bool    debug_mode = false;
+    char    device_name[32] = {0};
+
+    ESP_ERROR_CHECK(read_int("storage",  "boot_count",  &boot_count));
+    ESP_ERROR_CHECK(read_bool("storage", "debug_mode",  &debug_mode));
+    ESP_ERROR_CHECK(read_str("storage",  "device_name", device_name, sizeof(device_name)));
+
+    ESP_LOGI(TAG, "boot_count=%ld  debug_mode=%s  device_name=%s",
+             boot_count, debug_mode ? "true" : "false", device_name);
 
     printf("New Hello World from ESP32-P4!\n");
 

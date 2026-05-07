@@ -1,5 +1,6 @@
 # ESP-IDF build output
 build/
+storage_dump/
 
 # Generated SDK config (remove comment to ignore — track if you want reproducible builds)
 # sdkconfig
