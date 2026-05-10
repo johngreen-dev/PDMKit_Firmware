@@ -1,7 +1,6 @@
 {
   "idf.currentSetup": "C:\\Users\\johng\\esp\\v5.5\\esp-idf",
   "idf.customExtraVars": {
-    "OPENOCD_USB_ADAPTER_LOCATION": "2-3",
     "IDF_TARGET": "esp32p4"
   },
   "clangd.path": "C:\\Users\\johng\\.espressif\\tools\\esp-clang\\esp-19.1.2_20250312\\esp-clang\\bin\\clangd.exe",

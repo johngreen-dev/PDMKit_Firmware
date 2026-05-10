@@ -1,1 +1,6 @@
 CONFIG_IDF_TARGET="esp32p4"
+
+# Watchdogs fire when the CPU is halted by the debugger (interrupts stop).
+# Disable both so breakpoints don't cause a system reset.
+CONFIG_ESP_INT_WDT=n
+CONFIG_ESP_TASK_WDT_INIT=n

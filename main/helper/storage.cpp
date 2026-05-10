@@ -1,11 +1,11 @@
-#include "storage.h"
+#include "storage.hpp"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_log.h"
 
 static const char *TAG = "storage";
 
-esp_err_t storage_init(void)
+esp_err_t Storage::init()
 {
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -16,12 +16,14 @@ esp_err_t storage_init(void)
     return err;
 }
 
+Storage::Storage(const char *ns) : _ns(ns) {}
+
 // --- int ---------------------------------------------------------------------
 
-esp_err_t store_int(const char *ns, const char *key, int32_t value)
+esp_err_t Storage::putInt(const char *key, int32_t value)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open(ns, NVS_READWRITE, &h);
+    esp_err_t err = nvs_open(_ns, NVS_READWRITE, &h);
     if (err != ESP_OK) return err;
 
     err = nvs_set_i32(h, key, value);
@@ -30,23 +32,23 @@ esp_err_t store_int(const char *ns, const char *key, int32_t value)
     return err;
 }
 
-esp_err_t read_int(const char *ns, const char *key, int32_t *out)
+esp_err_t Storage::getInt(const char *key, int32_t &out)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open(ns, NVS_READONLY, &h);
+    esp_err_t err = nvs_open(_ns, NVS_READONLY, &h);
     if (err != ESP_OK) return err;
 
-    err = nvs_get_i32(h, key, out);
+    err = nvs_get_i32(h, key, &out);
     nvs_close(h);
     return err;
 }
 
 // --- bool --------------------------------------------------------------------
 
-esp_err_t store_bool(const char *ns, const char *key, bool value)
+esp_err_t Storage::putBool(const char *key, bool value)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open(ns, NVS_READWRITE, &h);
+    esp_err_t err = nvs_open(_ns, NVS_READWRITE, &h);
     if (err != ESP_OK) return err;
 
     err = nvs_set_u8(h, key, value ? 1 : 0);
@@ -55,25 +57,25 @@ esp_err_t store_bool(const char *ns, const char *key, bool value)
     return err;
 }
 
-esp_err_t read_bool(const char *ns, const char *key, bool *out)
+esp_err_t Storage::getBool(const char *key, bool &out)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open(ns, NVS_READONLY, &h);
+    esp_err_t err = nvs_open(_ns, NVS_READONLY, &h);
     if (err != ESP_OK) return err;
 
     uint8_t raw = 0;
     err = nvs_get_u8(h, key, &raw);
-    if (err == ESP_OK) *out = (raw != 0);
+    if (err == ESP_OK) out = (raw != 0);
     nvs_close(h);
     return err;
 }
 
 // --- string ------------------------------------------------------------------
 
-esp_err_t store_str(const char *ns, const char *key, const char *value)
+esp_err_t Storage::putStr(const char *key, const char *value)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open(ns, NVS_READWRITE, &h);
+    esp_err_t err = nvs_open(_ns, NVS_READWRITE, &h);
     if (err != ESP_OK) return err;
 
     err = nvs_set_str(h, key, value);
@@ -82,10 +84,10 @@ esp_err_t store_str(const char *ns, const char *key, const char *value)
     return err;
 }
 
-esp_err_t read_str(const char *ns, const char *key, char *buf, size_t buf_len)
+esp_err_t Storage::getStr(const char *key, char *buf, size_t buf_len)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open(ns, NVS_READONLY, &h);
+    esp_err_t err = nvs_open(_ns, NVS_READONLY, &h);
     if (err != ESP_OK) return err;
 
     err = nvs_get_str(h, key, buf, &buf_len);

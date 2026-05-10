@@ -1,0 +1,11 @@
+{
+  "configurations": [
+    {
+      "name": "ESP32-P4",
+      "compileCommands": "${workspaceFolder}/build/compile_commands.json",
+      "intelliSenseMode": "gcc-arm",
+      "compilerPath": "C:\\Users\\johng\\.espressif\\tools\\riscv32-esp-elf\\esp-14.2.0_20241119\\riscv32-esp-elf\\bin\\riscv32-esp-elf-gcc.exe"
+    }
+  ],
+  "version": 4
+}

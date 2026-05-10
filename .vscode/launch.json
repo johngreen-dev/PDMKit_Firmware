@@ -1,13 +1,10 @@
 {
-    "version": "0.2.0",
-    "configurations": [
-        {
-            "type": "gdbtarget",
-            "request": "attach",
-            "name": "ESP32-P4: Debug (USB JTAG)",
-            "program": "${workspaceFolder}/build/hello_world.elf",
-            "runOpenOCD": false,
-            "preLaunchTask": "ESP-IDF: Build + Flash + OpenOCD"
-        }
-    ]
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "gdbtarget",
+      "request": "attach",
+      "name": "Eclipse CDT GDB Adapter"
+    }
+  ]
 }
