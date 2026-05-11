@@ -6,9 +6,8 @@
 
 class Storage {
 public:
-    static esp_err_t init();
-
-    explicit Storage(const char *ns);
+    static esp_err_t  init();
+    static Storage   &instance();
 
     esp_err_t putInt(const char *key, int32_t value);
     esp_err_t getInt(const char *key, int32_t &out);
@@ -20,5 +19,7 @@ public:
     esp_err_t getStr(const char *key, char *buf, size_t buf_len);
 
 private:
+    explicit Storage(const char *ns);
+
     const char *_ns;
 };

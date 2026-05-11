@@ -18,6 +18,12 @@ esp_err_t Storage::init()
 
 Storage::Storage(const char *ns) : _ns(ns) {}
 
+Storage &Storage::instance()
+{
+    static Storage s_instance("storage");
+    return s_instance;
+}
+
 // --- int ---------------------------------------------------------------------
 
 esp_err_t Storage::putInt(const char *key, int32_t value)
