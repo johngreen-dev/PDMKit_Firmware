@@ -18,9 +18,10 @@ private:
     void onStartSetup();
     void onSaveSetup();
     void onCancelSetup();
+    void onGetStorage();
     void sendResponse(const char *msg);
 
-    bool          _remote_setup_mode = false;
+    bool          _setup_mode = false;
     char          _line_buf[128]     = {};
     int           _line_len          = 0;
     QueueHandle_t _rx_queue          = nullptr;

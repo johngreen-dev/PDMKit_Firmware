@@ -6,7 +6,9 @@
 #include "tinyusb.h"
 #include "tinyusb_cdc_acm.h"
 #include "storage.hpp"
+#include "nvs.h"
 #include <cstring>
+#include <cstdio>
 
 static const char *TAG = "remote_setup";
 
@@ -35,8 +37,14 @@ void RemoteSetupTask::run()
 {
     ESP_LOGI(TAG, "Remote setup task started");
 
-    Storage::instance().getBool("remote_setup_mode", _remote_setup_mode);
-    ESP_LOGI(TAG, "remote_setup_mode=%s", _remote_setup_mode ? "true" : "false");
+    esp_err_t err = Storage::instance().getBool("setup_mode", _setup_mode);
+    ESP_LOGI(TAG, "getBool(setup_mode): %s", esp_err_to_name(err));
+    if (err != ESP_OK) {
+        _setup_mode = false;
+        err = Storage::instance().putBool("setup_mode", _setup_mode);
+        ESP_LOGI(TAG, "putBool(setup_mode, false): %s", esp_err_to_name(err));
+    }
+    ESP_LOGI(TAG, "setup_mode=%s", _setup_mode ? "true" : "false");
 
     _rx_queue = xQueueCreate(256, sizeof(uint8_t));
 
@@ -118,28 +126,86 @@ void RemoteSetupTask::handleCommand(const char *cmd)
     if      (strcmp(cmd, "RS_StartSetup")  == 0) onStartSetup();
     else if (strcmp(cmd, "RS_SaveSetup")   == 0) onSaveSetup();
     else if (strcmp(cmd, "RS_CancelSetup") == 0) onCancelSetup();
+    else if (strcmp(cmd, "RS_GetStorage")  == 0) onGetStorage();
     else sendResponse("ERR_UNKNOWN_CMD\n");
 }
 
 void RemoteSetupTask::onStartSetup()
 {
-    _remote_setup_mode = true;
-    Storage::instance().putBool("remote_setup_mode", _remote_setup_mode);
+    _setup_mode = true;
+    esp_err_t err = Storage::instance().putBool("setup_mode", _setup_mode);
+    ESP_LOGI(TAG, "putBool(setup_mode, true): %s", esp_err_to_name(err));
     sendResponse("OK_StartSetup\n");
 }
 
 void RemoteSetupTask::onSaveSetup()
 {
-    _remote_setup_mode = false;
-    Storage::instance().putBool("remote_setup_mode", _remote_setup_mode);
+    _setup_mode = false;
+    esp_err_t err = Storage::instance().putBool("setup_mode", _setup_mode);
+    ESP_LOGI(TAG, "putBool(setup_mode, false): %s", esp_err_to_name(err));
     sendResponse("OK_SaveSetup\n");
 }
 
 void RemoteSetupTask::onCancelSetup()
 {
-    _remote_setup_mode = false;
-    Storage::instance().putBool("remote_setup_mode", _remote_setup_mode);
+    _setup_mode = false;
+    esp_err_t err = Storage::instance().putBool("setup_mode", _setup_mode);
+    ESP_LOGI(TAG, "putBool(setup_mode, false): %s", esp_err_to_name(err));
     sendResponse("OK_CancelSetup\n");
+}
+
+void RemoteSetupTask::onGetStorage()
+{
+    sendResponse("STORAGE_BEGIN\n");
+
+    nvs_iterator_t it = nullptr;
+    esp_err_t find_err = nvs_entry_find("nvs", "storage", NVS_TYPE_ANY, &it);
+    ESP_LOGI(TAG, "nvs_entry_find: %s it=%p", esp_err_to_name(find_err), (void*)it);
+
+    nvs_handle_t h;
+    esp_err_t open_err = nvs_open("storage", NVS_READONLY, &h);
+    ESP_LOGI(TAG, "nvs_open(READONLY): %s", esp_err_to_name(open_err));
+
+    int count = 0;
+    while (it != nullptr) {
+        nvs_entry_info_t info;
+        nvs_entry_info(it, &info);
+        ESP_LOGI(TAG, "  entry[%d] key=%s type=%d", count, info.key, (int)info.type);
+        count++;
+
+        char line[160];
+        switch (info.type) {
+            case NVS_TYPE_I32: {
+                int32_t val = 0;
+                nvs_get_i32(h, info.key, &val);
+                snprintf(line, sizeof(line), "%s:int:%ld\n", info.key, val);
+                break;
+            }
+            case NVS_TYPE_U8: {
+                uint8_t val = 0;
+                nvs_get_u8(h, info.key, &val);
+                snprintf(line, sizeof(line), "%s:bool:%s\n", info.key, val ? "true" : "false");
+                break;
+            }
+            case NVS_TYPE_STR: {
+                char val[64] = {};
+                size_t len = sizeof(val);
+                nvs_get_str(h, info.key, val, &len);
+                snprintf(line, sizeof(line), "%s:str:%s\n", info.key, val);
+                break;
+            }
+            default:
+                snprintf(line, sizeof(line), "%s:unknown:-\n", info.key);
+                break;
+        }
+        sendResponse(line);
+        nvs_entry_next(&it);
+    }
+
+    ESP_LOGI(TAG, "nvs iterator done, %d entries", count);
+    nvs_release_iterator(it);
+    nvs_close(h);
+    sendResponse("STORAGE_END\n");
 }
 
 void RemoteSetupTask::sendResponse(const char *msg)

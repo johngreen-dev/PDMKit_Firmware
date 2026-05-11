@@ -26,7 +26,7 @@ Storage &Storage::instance()
 
 // --- int ---------------------------------------------------------------------
 
-esp_err_t Storage::putInt(const char *key, int32_t value)
+esp_err_t Storage::_putInt(const char *key, int32_t value)
 {
     nvs_handle_t h;
     esp_err_t err = nvs_open(_ns, NVS_READWRITE, &h);
@@ -38,7 +38,7 @@ esp_err_t Storage::putInt(const char *key, int32_t value)
     return err;
 }
 
-esp_err_t Storage::getInt(const char *key, int32_t &out)
+esp_err_t Storage::_getInt(const char *key, int32_t &out)
 {
     nvs_handle_t h;
     esp_err_t err = nvs_open(_ns, NVS_READONLY, &h);
@@ -51,7 +51,7 @@ esp_err_t Storage::getInt(const char *key, int32_t &out)
 
 // --- bool --------------------------------------------------------------------
 
-esp_err_t Storage::putBool(const char *key, bool value)
+esp_err_t Storage::_putBool(const char *key, bool value)
 {
     nvs_handle_t h;
     esp_err_t err = nvs_open(_ns, NVS_READWRITE, &h);
@@ -63,7 +63,7 @@ esp_err_t Storage::putBool(const char *key, bool value)
     return err;
 }
 
-esp_err_t Storage::getBool(const char *key, bool &out)
+esp_err_t Storage::_getBool(const char *key, bool &out)
 {
     nvs_handle_t h;
     esp_err_t err = nvs_open(_ns, NVS_READONLY, &h);
@@ -78,7 +78,7 @@ esp_err_t Storage::getBool(const char *key, bool &out)
 
 // --- string ------------------------------------------------------------------
 
-esp_err_t Storage::putStr(const char *key, const char *value)
+esp_err_t Storage::_putStr(const char *key, const char *value)
 {
     nvs_handle_t h;
     esp_err_t err = nvs_open(_ns, NVS_READWRITE, &h);
@@ -90,7 +90,7 @@ esp_err_t Storage::putStr(const char *key, const char *value)
     return err;
 }
 
-esp_err_t Storage::getStr(const char *key, char *buf, size_t buf_len)
+esp_err_t Storage::_getStr(const char *key, char *buf, size_t buf_len)
 {
     nvs_handle_t h;
     esp_err_t err = nvs_open(_ns, NVS_READONLY, &h);

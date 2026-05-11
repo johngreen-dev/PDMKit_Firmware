@@ -68,6 +68,34 @@ OK_CancelSetup
 
 ---
 
+### `RS_GetStorage`
+
+Reads all entries in the `storage` NVS namespace and returns them as a delimited block.
+
+**Request**
+```
+RS_GetStorage
+```
+
+**Response**
+```
+STORAGE_BEGIN
+<key>:<type>:<value>
+...
+STORAGE_END
+```
+
+Types: `int`, `bool`, `str`, `unknown`. Example:
+```
+STORAGE_BEGIN
+remote_setup_mode:bool:false
+boot_count:int:5
+device_name:str:pdm-001
+STORAGE_END
+```
+
+---
+
 ## Error response
 
 Any line that starts with `RS_` but does not match a known command returns:
