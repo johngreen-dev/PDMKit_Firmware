@@ -208,10 +208,17 @@ void RemoteSetupTask::onGetStorage()
                 break;
             }
             case NVS_TYPE_STR: {
-                char val[64] = {};
-                size_t len = sizeof(val);
+                size_t len = 0;
+                nvs_get_str(h, info.key, nullptr, &len);
+                char *val = new char[len]();
                 nvs_get_str(h, info.key, val, &len);
-                snprintf(line, sizeof(line), "%s:str:%s\n", info.key, val);
+                char hdr[48];
+                snprintf(hdr, sizeof(hdr), "%s:str:", info.key);
+                sendResponse(hdr);
+                sendResponse(val);
+                sendResponse("\n");
+                delete[] val;
+                line[0] = '\0';
                 break;
             }
             default:
