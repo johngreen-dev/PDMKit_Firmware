@@ -2,6 +2,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "storage.hpp"
+#include "io_config.hpp"
 #include "remote_setup_task.hpp"
 #include "main_controller.hpp"
 
@@ -12,6 +13,7 @@ extern "C" void app_main(void)
     printf("Welcome to the Power Distribution Module Controller!\n");
 
     ESP_ERROR_CHECK(Storage::init());
+    IOConfigManager::instance().load();
 
     MainController::instance().start();
     s_remote_setup.start();

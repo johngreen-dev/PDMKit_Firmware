@@ -3,26 +3,21 @@
 #include "task.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <atomic>
 
-// Runs on APP_CPU (core 1) at the highest FreeRTOS priority.
-// Subclass and override tick() to add control logic.
-// tick() is called in a tight loop with no delay — it will fully occupy core 1.
-// If you need to yield (e.g. wait on a queue), do it inside tick().
+struct RuleState;  // defined in main_controller.cpp
 
 class MainController : public Task {
 public:
     static MainController &instance();
-
     void start();
-
-protected:
-    virtual void tick();
+    void requestReload();   // called by RemoteSetupTask after RS_SaveSetup
 
 private:
     MainController();
     void run() override;
+    void evalRule(RuleState &s, TickType_t now);
+    void runDemo();
 
-    TickType_t _lastLed1  = 0;
-    TickType_t _lastLed2  = 0;
-    TickType_t _lastSwLog = 0;
+    std::atomic<bool> _reload{false};
 };
