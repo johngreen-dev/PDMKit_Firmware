@@ -2,6 +2,8 @@
 #include "io_config.hpp"
 #include "gpio.hpp"
 #include "expr.hpp"
+#include "can_store.hpp"
+#include "can_task.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -241,6 +243,111 @@ static bool computeRule(RuleState &s, const std::map<std::string, bool> &sig, Ti
             return false;
         }
 
+        // ---- CAN RX: signal → GPIO ----
+
+        case RuleType::CAN_SIG: {
+            // Extract signal, compare to thresh_lo; optional invert.
+            uint32_t raw = 0;
+            if (!CanStore::instance().extractSignal(r.can_id, r.can_byte, r.can_bit, r.can_len, raw))
+                return r.invert;   // no frame yet → treat as below threshold
+            bool above = ((int32_t)raw > r.thresh_lo);
+            return r.invert ? !above : above;
+        }
+
+        case RuleType::CAN_THR: {
+            // Hysteresis-style: above thresh_hi → latch on; below thresh_lo → latch off.
+            uint32_t raw = 0;
+            if (!CanStore::instance().extractSignal(r.can_id, r.can_byte, r.can_bit, r.can_len, raw)) {
+                return false;
+            }
+            int32_t v = (int32_t)raw;
+            if (v > r.thresh_hi) s.toggle_state = true;
+            else if (v < r.thresh_lo) s.toggle_state = false;
+            return s.toggle_state;
+        }
+
+        case RuleType::CAN_MAP: {
+            // Map CAN signal linearly → PWM duty.  Side-effect only, no GPIO claim.
+            uint32_t raw = 0;
+            if (CanStore::instance().extractSignal(r.can_id, r.can_byte, r.can_bit, r.can_len, raw)) {
+                float range = (float)(r.thresh_hi - r.thresh_lo);
+                float f = (range > 0.0f) ?
+                    ((float)((int32_t)raw - r.thresh_lo) / range) : 0.0f;
+                if (f < 0.0f) f = 0.0f;
+                if (f > 1.0f) f = 1.0f;
+                float duty = r.out_lo + f * (r.out_hi - r.out_lo);
+                PinRegistry::setDutyF(r.dst.c_str(), duty / 100.0f);
+            }
+            return false;
+        }
+
+        case RuleType::CAN_TIMEOUT: {
+            // High (or inverted low) when a frame has not been received within window_ms.
+            TickType_t tick = CanStore::instance().lastTick(r.can_id);
+            if (tick == 0) return !r.invert;   // never received → timed out
+            bool timed_out = (now - tick) > pdMS_TO_TICKS(r.window_ms);
+            return r.invert ? !timed_out : timed_out;
+        }
+
+        case RuleType::CAN_HRX: {
+            // Heartbeat receive watchdog: dst is high while heartbeat arrives in time.
+            TickType_t tick = CanStore::instance().lastTick(r.can_id);
+            if (tick == 0) return false;
+            return (now - tick) < pdMS_TO_TICKS(r.window_ms);
+        }
+
+        case RuleType::CAN_CMD_OUT: {
+            // Received command byte equals thresh_lo → dst high.
+            uint32_t raw = 0;
+            if (!CanStore::instance().extractSignal(r.can_id, r.can_byte, r.can_bit, r.can_len, raw))
+                return false;
+            return ((int32_t)raw == r.thresh_lo);
+        }
+
+        case RuleType::CAN_BOFF:
+            return CanTask::instance().isBusOff();
+
+        // ---- CAN TX: side-effect rules — post frame to CAN task ----
+
+        case RuleType::CAN_TX_ST: {
+            // Periodic status frame: data[0] = GPIO state (1 bit).
+            if (r.param_b == 0) return false;
+            if ((now - s.last_flash) < pdMS_TO_TICKS(r.param_b)) return false;
+            s.last_flash = now;
+            bool state = sigGet(sig, r.srcs.empty() ? "" : r.srcs[0]);
+            uint8_t data[1] = { (uint8_t)(state ? 1u : 0u) };
+            CanTask::instance().postTx(r.can_id, data, 1, r.can_ext);
+            return false;
+        }
+
+        case RuleType::CAN_TX_AN: {
+            // Periodic analog frame: data[can_byte..can_byte+1] = ADC mV as big-endian uint16.
+            if (r.param_b == 0) return false;
+            if ((now - s.last_flash) < pdMS_TO_TICKS(r.param_b)) return false;
+            s.last_flash = now;
+            int mv = 0;
+            const char *src = r.srcs.empty() ? "" : r.srcs[0].c_str();
+            if (PinRegistry::readMv(src, mv) == ESP_OK) {
+                uint8_t data[8] = {};
+                uint8_t off = r.can_byte < 7 ? r.can_byte : 0;
+                data[off]   = (uint8_t)((mv >> 8) & 0xFF);
+                data[off+1] = (uint8_t)(mv & 0xFF);
+                CanTask::instance().postTx(r.can_id, data, off + 2u, r.can_ext);
+            }
+            return false;
+        }
+
+        case RuleType::CAN_HTX: {
+            // Periodic heartbeat: data[0]=0xAA, data[1]=rolling counter.
+            if (r.param_b == 0) return false;
+            if ((now - s.last_flash) < pdMS_TO_TICKS(r.param_b)) return false;
+            s.last_flash = now;
+            s.press_count++;   // reuse press_count as the rolling counter
+            uint8_t data[2] = { 0xAAu, (uint8_t)s.press_count };
+            CanTask::instance().postTx(r.can_id, data, 2, r.can_ext);
+            return false;
+        }
+
         default:
             return false;  // not yet implemented
     }
@@ -294,10 +401,18 @@ static void evalTick(
         // ADC/PWM side-effect rules return false; skip them for claims
         bool val = computeRule(s, sig, now);
 
-        // Skip side-effect-only rules
-        if (s.rule.type == RuleType::ADC_MAP ||
-            s.rule.type == RuleType::THERM_DRT ||
-            s.rule.type == RuleType::PWM_OUT)
+        // Skip side-effect-only rules (PWM/ADC mappings and CAN TX)
+        if (s.rule.type == RuleType::ADC_MAP    ||
+            s.rule.type == RuleType::THERM_DRT  ||
+            s.rule.type == RuleType::PWM_OUT    ||
+            s.rule.type == RuleType::CAN_MAP    ||
+            s.rule.type == RuleType::CAN_TX_ST  ||
+            s.rule.type == RuleType::CAN_TX_AN  ||
+            s.rule.type == RuleType::CAN_TX_CUR ||
+            s.rule.type == RuleType::CAN_TX_FLT ||
+            s.rule.type == RuleType::CAN_TX_EVT ||
+            s.rule.type == RuleType::CAN_HTX    ||
+            s.rule.type == RuleType::CAN_ELOG)
             continue;
 
         const std::string &dst = s.rule.dst;
@@ -389,6 +504,27 @@ void MainController::run()
         ESP_LOGI(TAG, "%d pin(s), %d rule(s), %d var(s), %d group(s)",
                  (int)io.pins().size(), (int)ruleStates.size(),
                  (int)varStates.size(), (int)io.groups().size());
+
+        // Build the CAN RX filter from rules that consume incoming frames.
+        {
+            std::vector<uint32_t> can_ids;
+            for (const auto &s : ruleStates) {
+                switch (s.rule.type) {
+                    case RuleType::CAN_SIG:
+                    case RuleType::CAN_THR:
+                    case RuleType::CAN_MAP:
+                    case RuleType::CAN_TIMEOUT:
+                    case RuleType::CAN_MCOND:
+                    case RuleType::CAN_HRX:
+                    case RuleType::CAN_CMD_OUT:
+                    case RuleType::CAN_CMD_FR:
+                        can_ids.push_back(s.rule.can_id);
+                        break;
+                    default: break;
+                }
+            }
+            CanStore::instance().setMonitoredIds(can_ids);
+        }
 
         // Initialise oscillator timestamps
         TickType_t now = xTaskGetTickCount();

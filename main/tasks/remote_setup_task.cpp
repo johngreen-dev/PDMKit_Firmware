@@ -3,6 +3,8 @@
 #include "gpio.hpp"
 #include "expr.hpp"
 #include "main_controller.hpp"
+#include "io_rules.hpp"
+#include "can_task.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -154,6 +156,8 @@ void RemoteSetupTask::handleCommand(const char *cmd)
     else if (strcmp (cmd, "RS_ListPins")          == 0) onListPins();
     else if (strncmp(cmd, "RS_SetOutput ", 13)   == 0) onSetOutput(cmd + 13);
     else if (strncmp(cmd, "RS_GetInput ",  12)   == 0) onGetInput (cmd + 12);
+    // CAN runtime config
+    else if (strncmp(cmd, "RS_SetCANBaud ", 14)  == 0) onSetCANBaud(cmd + 14);
     else sendResponse("ERR_UNKNOWN_CMD\n");
 }
 
@@ -307,6 +311,163 @@ void RemoteSetupTask::onRemovePin(const char *args)
     sendResponse(e == ESP_OK ? "OK_RemovePin\n" : "ERR_NOT_FOUND\n");
 }
 
+// --- CAN rule parsing helpers ---
+
+static inline bool isCanRuleType(RuleType t)
+{
+    switch (t) {
+        case RuleType::CAN_SIG: case RuleType::CAN_THR: case RuleType::CAN_MAP:
+        case RuleType::CAN_TIMEOUT: case RuleType::CAN_MCOND:
+        case RuleType::CAN_TX_ST: case RuleType::CAN_TX_AN: case RuleType::CAN_TX_CUR:
+        case RuleType::CAN_TX_FLT: case RuleType::CAN_TX_EVT:
+        case RuleType::CAN_CMD_OUT: case RuleType::CAN_CMD_FR: case RuleType::CAN_CMD_LC:
+        case RuleType::CAN_BOFF: case RuleType::CAN_HTX: case RuleType::CAN_HRX:
+        case RuleType::CAN_ELOG: return true;
+        default: return false;
+    }
+}
+
+// Tokenise a string into up to max_tok whitespace-separated tokens.
+// Returns the number of tokens found.
+static int tokenise(const char *s, char tokens[][32], int max_tok)
+{
+    int n = 0;
+    while (*s && n < max_tok) {
+        while (*s && isspace((unsigned char)*s)) s++;
+        if (!*s) break;
+        int i = 0;
+        while (*s && !isspace((unsigned char)*s) && i < 31) tokens[n][i++] = *s++;
+        tokens[n][i] = '\0';
+        n++;
+    }
+    return n;
+}
+
+// Parse CAN rule arguments from the remainder string (after the type token).
+// Wire formats:
+//   can_sig     <id> <byte> <bit> <len> <dst> [thresh] [invert]
+//   can_thr     <id> <byte> <bit> <len> <dst> <tlo> <thi>
+//   can_map     <id> <byte> <bit> <len> <dst> <tlo> <thi> [olo] [ohi]
+//   can_timeout <id> <dst> <window_ms> [invert]
+//   can_hrx     <id> <dst> <window_ms>
+//   can_cmd_out <id> <byte> <cmd_val> <dst>
+//   can_tx_st   <src> <id> <interval_ms>
+//   can_tx_an   <src> <id> <byte> <interval_ms>
+//   can_htx     <id> <interval_ms>
+//   can_boff    <dst>
+// CAN IDs may be decimal or 0x-prefixed hex.
+static bool parseCanRule(RuleType type, const char *args, IORule &r)
+{
+    char tok[10][32] = {};
+    int  n = tokenise(args, tok, 10);
+
+    auto id  = [&](int i) -> uint32_t { return (uint32_t)strtoul(tok[i], nullptr, 0); };
+    auto u32 = [&](int i) -> uint32_t { return (uint32_t)strtoul(tok[i], nullptr, 10); };
+    auto i32 = [&](int i) -> int32_t  { return (int32_t) strtol (tok[i], nullptr, 10); };
+
+    r.type = type;
+
+    switch (type) {
+        case RuleType::CAN_SIG:
+            // <id> <byte> <bit> <len> <dst> [thresh] [invert]
+            if (n < 5) return false;
+            r.can_id    = id(0);
+            r.can_byte  = (uint8_t)u32(1);
+            r.can_bit   = (uint8_t)u32(2);
+            r.can_len   = (uint8_t)u32(3);
+            r.dst       = tok[4];
+            r.thresh_lo = n >= 6 ? i32(5) : 0;
+            r.invert    = n >= 7 && u32(6) != 0;
+            break;
+
+        case RuleType::CAN_THR:
+            // <id> <byte> <bit> <len> <dst> <tlo> <thi>
+            if (n < 7) return false;
+            r.can_id    = id(0);
+            r.can_byte  = (uint8_t)u32(1);
+            r.can_bit   = (uint8_t)u32(2);
+            r.can_len   = (uint8_t)u32(3);
+            r.dst       = tok[4];
+            r.thresh_lo = i32(5);
+            r.thresh_hi = i32(6);
+            break;
+
+        case RuleType::CAN_MAP:
+            // <id> <byte> <bit> <len> <dst> <tlo> <thi> [olo] [ohi]
+            if (n < 7) return false;
+            r.can_id    = id(0);
+            r.can_byte  = (uint8_t)u32(1);
+            r.can_bit   = (uint8_t)u32(2);
+            r.can_len   = (uint8_t)u32(3);
+            r.dst       = tok[4];
+            r.thresh_lo = i32(5);
+            r.thresh_hi = i32(6);
+            r.out_lo    = n >= 8 ? i32(7) : 0;
+            r.out_hi    = n >= 9 ? i32(8) : 100;
+            break;
+
+        case RuleType::CAN_TIMEOUT:
+            // <id> <dst> <window_ms> [invert]
+            if (n < 3) return false;
+            r.can_id    = id(0);
+            r.dst       = tok[1];
+            r.window_ms = u32(2);
+            r.invert    = n >= 4 && u32(3) != 0;
+            break;
+
+        case RuleType::CAN_HRX:
+            // <id> <dst> <window_ms>
+            if (n < 3) return false;
+            r.can_id    = id(0);
+            r.dst       = tok[1];
+            r.window_ms = u32(2);
+            break;
+
+        case RuleType::CAN_CMD_OUT:
+            // <id> <byte> <cmd_val> <dst>
+            if (n < 4) return false;
+            r.can_id    = id(0);
+            r.can_byte  = (uint8_t)u32(1);
+            r.thresh_lo = i32(2);
+            r.dst       = tok[3];
+            break;
+
+        case RuleType::CAN_TX_ST:
+            // <src> <id> <interval_ms>
+            if (n < 3) return false;
+            r.srcs.push_back(tok[0]);
+            r.can_id  = id(1);
+            r.param_b = u32(2);
+            break;
+
+        case RuleType::CAN_TX_AN:
+            // <src> <id> <byte> <interval_ms>
+            if (n < 4) return false;
+            r.srcs.push_back(tok[0]);
+            r.can_id   = id(1);
+            r.can_byte = (uint8_t)u32(2);
+            r.param_b  = u32(3);
+            break;
+
+        case RuleType::CAN_HTX:
+            // <id> <interval_ms>
+            if (n < 2) return false;
+            r.can_id  = id(0);
+            r.param_b = u32(1);
+            break;
+
+        case RuleType::CAN_BOFF:
+            // <dst>
+            if (n < 1) return false;
+            r.dst = tok[0];
+            break;
+
+        default:
+            return false;  // not yet implemented
+    }
+    return true;
+}
+
 // --- Rule config commands ---
 
 void RemoteSetupTask::onAddRule(const char *args)
@@ -322,6 +483,14 @@ void RemoteSetupTask::onAddRule(const char *args)
 
     IORule r;
     if (!parseRuleType(type_str, r.type)) { sendResponse("ERR_BAD_ARGS\n"); return; }
+
+    // --- CAN rules: bespoke parsing ---
+    if (isCanRuleType(r.type)) {
+        if (!parseCanRule(r.type, p, r)) { sendResponse("ERR_BAD_ARGS\n"); return; }
+        IOConfigManager::instance().addRule(r);
+        sendResponse("OK_AddRule\n");
+        return;
+    }
 
     // --- EXPR: <dst> <expression text...> ---
     if (r.type == RuleType::EXPR) {
@@ -632,6 +801,24 @@ void RemoteSetupTask::onRemoveGroup(const char *args)
     sscanf(args, "%31s", name);
     esp_err_t e = IOConfigManager::instance().removeGroup(name);
     sendResponse(e == ESP_OK ? "OK_RemoveGroup\n" : "ERR_NOT_FOUND\n");
+}
+
+// --- CAN runtime config ---
+
+void RemoteSetupTask::onSetCANBaud(const char *args)
+{
+    int32_t kbps = 0;
+    if (sscanf(args, "%ld", &kbps) != 1) {
+        sendResponse("ERR_BAD_ARGS\n"); return;
+    }
+    if (kbps != 125 && kbps != 250 && kbps != 500 && kbps != 800 && kbps != 1000) {
+        sendResponse("ERR_BAD_ARGS\n"); return;
+    }
+    Storage::instance().putInt("can_baud", kbps);
+    CanTask::instance().requestReconfig();
+    char resp[32];
+    snprintf(resp, sizeof(resp), "OK_SetCANBaud %ld\n", kbps);
+    sendResponse(resp);
 }
 
 void RemoteSetupTask::sendResponse(const char *msg)

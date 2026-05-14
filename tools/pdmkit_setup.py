@@ -216,26 +216,33 @@ RULE_CATEGORIES = [
         ("Thermal Derate", "therm_drt"),
         ("Watchdog Out",   "watchdog"),
     ]),
-    ("CAN  (placeholder)", [
-        ("Signal Extract",    "can_sig"),
-        ("Threshold",         "can_thr"),
-        ("Mapping",           "can_map"),
+    ("CAN", [
+        ("Signal → GPIO",     "can_sig"),
+        ("Signal Hysteresis", "can_thr"),
+        ("Signal → PWM Map",  "can_map"),
         ("Timeout Fallback",  "can_timeout"),
-        ("Multi-Condition",   "can_mcond"),
+        ("CMD: Output Ctrl",  "can_cmd_out"),
+        ("Heartbeat RX",      "can_hrx"),
         ("TX: Status",        "can_tx_st"),
         ("TX: Analog",        "can_tx_an"),
+        ("Heartbeat TX",      "can_htx"),
+        ("Bus-Off Status",    "can_boff"),
+        # Not yet implemented:
+        ("Multi-Condition",   "can_mcond"),
         ("TX: Current",       "can_tx_cur"),
         ("TX: Fault",         "can_tx_flt"),
         ("TX: Event",         "can_tx_evt"),
-        ("CMD: Output Ctrl",  "can_cmd_out"),
         ("CMD: Fault Reset",  "can_cmd_fr"),
         ("CMD: Live Config",  "can_cmd_lc"),
-        ("Bus-Off Recovery",  "can_boff"),
-        ("Heartbeat TX",      "can_htx"),
-        ("Heartbeat RX",      "can_hrx"),
-        ("Error Counter Log", "can_elog"),
+        ("Error Log",         "can_elog"),
     ]),
 ]
+
+_CAN_IMPLEMENTED = {
+    "can_sig", "can_thr", "can_map", "can_timeout",
+    "can_cmd_out", "can_hrx",
+    "can_tx_st", "can_tx_an", "can_htx", "can_boff",
+}
 
 def _f(fid, label, wtype, default=None):
     """Return a field spec tuple."""
@@ -322,6 +329,52 @@ RULE_FIELDS: dict[str, list[tuple]] = {
                   _f("thi","Max temp (mv)","entry","3000")],
     "watchdog":  [_f("src","Heartbeat pin","pin"), _f("dst","Output pin","pin"),
                   _f("window_ms","Timeout (ms)","entry","1000")],
+    # CAN RX rules
+    "can_sig":     [_f("can_id","CAN ID (hex or dec)","entry","0x200"),
+                    _f("can_byte","Byte offset (0-7)","entry","0"),
+                    _f("can_bit", "Bit offset (0-7)","entry","0"),
+                    _f("can_len", "Bit length","entry","8"),
+                    _f("dst","Dest pin","pin"),
+                    _f("tlo","Threshold (raw)","entry","128"),
+                    _f("invert","Invert (high when below)","check",False)],
+    "can_thr":     [_f("can_id","CAN ID (hex or dec)","entry","0x200"),
+                    _f("can_byte","Byte offset (0-7)","entry","0"),
+                    _f("can_bit", "Bit offset (0-7)","entry","0"),
+                    _f("can_len", "Bit length","entry","8"),
+                    _f("dst","Dest pin","pin"),
+                    _f("tlo","Low threshold (raw)","entry","100"),
+                    _f("thi","High threshold (raw)","entry","200")],
+    "can_map":     [_f("can_id","CAN ID (hex or dec)","entry","0x200"),
+                    _f("can_byte","Byte offset (0-7)","entry","0"),
+                    _f("can_bit", "Bit offset (0-7)","entry","0"),
+                    _f("can_len", "Bit length","entry","8"),
+                    _f("dst","Dest pin (PWM)","pin"),
+                    _f("tlo","Input low (raw)","entry","0"),
+                    _f("thi","Input high (raw)","entry","255"),
+                    _f("olo","Output low (%)","entry","0"),
+                    _f("ohi","Output high (%)","entry","100")],
+    "can_timeout": [_f("can_id","CAN ID (hex or dec)","entry","0x200"),
+                    _f("dst","Dest pin","pin"),
+                    _f("window_ms","Timeout (ms)","entry","1000"),
+                    _f("invert","Invert (high = alive)","check",False)],
+    "can_hrx":     [_f("can_id","CAN ID (hex or dec)","entry","0x200"),
+                    _f("dst","Dest pin","pin"),
+                    _f("window_ms","Timeout (ms)","entry","1000")],
+    "can_cmd_out": [_f("can_id","CAN ID (hex or dec)","entry","0x200"),
+                    _f("can_byte","Command byte offset","entry","0"),
+                    _f("tlo","Command value","entry","1"),
+                    _f("dst","Dest pin","pin")],
+    # CAN TX rules
+    "can_tx_st":   [_f("src","Source pin (GPIO)","pin"),
+                    _f("can_id","CAN ID (hex or dec)","entry","0x300"),
+                    _f("pb","Interval (ms)","entry","100")],
+    "can_tx_an":   [_f("src","Source pin (ADC)","pin"),
+                    _f("can_id","CAN ID (hex or dec)","entry","0x301"),
+                    _f("can_byte","Data byte offset","entry","0"),
+                    _f("pb","Interval (ms)","entry","100")],
+    "can_htx":     [_f("can_id","CAN ID (hex or dec)","entry","0x7FF"),
+                    _f("pb","Interval (ms)","entry","100")],
+    "can_boff":    [_f("dst","Status pin (high = bus-off)","pin")],
 }
 
 def _wire_to_cat_label(wire: str) -> tuple[str, str]:
@@ -436,9 +489,9 @@ class AddRuleDialog(tk.Toplevel):
         cat  = self._cat_var.get()
         wire = self._current_wire()
 
-        if "CAN" in cat:
+        if cat == "CAN" and wire not in _CAN_IMPLEMENTED:
             tk.Label(self._params_frame,
-                     text="CAN rules are placeholders — not yet implemented.",
+                     text="This CAN rule type is not yet implemented.",
                      fg="gray", wraplength=280, justify=tk.LEFT).pack(padx=4, pady=8)
             return
 
@@ -483,6 +536,69 @@ class AddRuleDialog(tk.Toplevel):
 
     # ---- command building ---------------------------------------------------
 
+    def _build_can_cmd(self, wire: str) -> str | None:
+        """Build and return the RS_AddRule command string for CAN rules."""
+        g = self._get
+        gi = self._geti
+
+        def require(*fids):
+            for fid in fids:
+                if not g(fid).strip():
+                    messagebox.showwarning("Missing", f"'{fid}' is required.", parent=self)
+                    return False
+            return True
+
+        cid = g("can_id", "0").strip() or "0"
+
+        if wire == "can_sig":
+            if not require("dst"): return None
+            inv = 1 if self._vars.get("invert", tk.BooleanVar()).get() else 0
+            return (f"RS_AddRule can_sig {cid} {gi('can_byte')} {gi('can_bit')} "
+                    f"{gi('can_len',8)} {g('dst').strip()} {gi('tlo')} {inv}")
+
+        if wire == "can_thr":
+            if not require("dst"): return None
+            return (f"RS_AddRule can_thr {cid} {gi('can_byte')} {gi('can_bit')} "
+                    f"{gi('can_len',8)} {g('dst').strip()} {gi('tlo')} {gi('thi',200)}")
+
+        if wire == "can_map":
+            if not require("dst"): return None
+            return (f"RS_AddRule can_map {cid} {gi('can_byte')} {gi('can_bit')} "
+                    f"{gi('can_len',8)} {g('dst').strip()} "
+                    f"{gi('tlo')} {gi('thi',255)} {gi('olo')} {gi('ohi',100)}")
+
+        if wire == "can_timeout":
+            if not require("dst"): return None
+            inv = 1 if self._vars.get("invert", tk.BooleanVar()).get() else 0
+            return f"RS_AddRule can_timeout {cid} {g('dst').strip()} {gi('window_ms',1000)} {inv}"
+
+        if wire == "can_hrx":
+            if not require("dst"): return None
+            return f"RS_AddRule can_hrx {cid} {g('dst').strip()} {gi('window_ms',1000)}"
+
+        if wire == "can_cmd_out":
+            if not require("dst"): return None
+            return (f"RS_AddRule can_cmd_out {cid} {gi('can_byte')} "
+                    f"{gi('tlo')} {g('dst').strip()}")
+
+        if wire == "can_tx_st":
+            if not require("src"): return None
+            return f"RS_AddRule can_tx_st {g('src').strip()} {cid} {gi('pb',100)}"
+
+        if wire == "can_tx_an":
+            if not require("src"): return None
+            return (f"RS_AddRule can_tx_an {g('src').strip()} {cid} "
+                    f"{gi('can_byte')} {gi('pb',100)}")
+
+        if wire == "can_htx":
+            return f"RS_AddRule can_htx {cid} {gi('pb',100)}"
+
+        if wire == "can_boff":
+            if not require("dst"): return None
+            return f"RS_AddRule can_boff {g('dst').strip()}"
+
+        return None
+
     def _get(self, fid, default="") -> str:
         v = self._vars.get(fid)
         return v.get() if v is not None else default
@@ -497,9 +613,16 @@ class AddRuleDialog(tk.Toplevel):
         cat  = self._cat_var.get()
         wire = self._current_wire()
 
-        if "CAN" in cat:
-            messagebox.showinfo("Not implemented",
-                                "CAN rules are placeholders and not yet implemented.", parent=self)
+        # --- CAN rules ---
+        if cat == "CAN":
+            if wire not in _CAN_IMPLEMENTED:
+                messagebox.showinfo("Not implemented",
+                                    "This CAN rule type is not yet implemented.", parent=self)
+                return
+            cmd = self._build_can_cmd(wire)
+            if cmd:
+                self._on_add(cmd)
+                self.destroy()
             return
 
         # --- Boolean expression: RS_AddRule expr <dst> <expression> ---------

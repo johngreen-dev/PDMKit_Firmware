@@ -51,6 +51,9 @@ private:
     void onSetOutput(const char *args);  // <name> <0|1>
     void onGetInput (const char *args);  // <name>
 
+    // CAN runtime config (work outside setup mode)
+    void onSetCANBaud(const char *args); // <kbps>
+
     void sendResponse(const char *msg);
 
     bool          _setup_mode      = false;

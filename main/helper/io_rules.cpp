@@ -122,6 +122,12 @@ cJSON *ruleToJson(const IORule &r)
     if (r.invert) cJSON_AddBoolToObject(obj, "inv", true);
     if (!r.expr.empty()) cJSON_AddStringToObject(obj, "expr", r.expr.c_str());
 
+    if (r.can_id)        cJSON_AddNumberToObject(obj, "cid", (double)r.can_id);
+    if (r.can_byte)      cJSON_AddNumberToObject(obj, "cby", (double)r.can_byte);
+    if (r.can_bit)       cJSON_AddNumberToObject(obj, "cbi", (double)r.can_bit);
+    if (r.can_len != 8)  cJSON_AddNumberToObject(obj, "cln", (double)r.can_len);
+    if (r.can_ext)       cJSON_AddBoolToObject(obj, "cxt", true);
+
     return obj;
 }
 
@@ -176,6 +182,14 @@ bool ruleFromJson(const cJSON *obj, IORule &out)
 
     cJSON *expr = cJSON_GetObjectItem(obj, "expr");
     if (cJSON_IsString(expr)) out.expr = expr->valuestring;
+
+    out.can_id   = getU("cid");
+    out.can_byte = (uint8_t)getU("cby");
+    out.can_bit  = (uint8_t)getU("cbi");
+    { cJSON *v = cJSON_GetObjectItem(obj, "cln");
+      out.can_len = cJSON_IsNumber(v) ? (uint8_t)v->valuedouble : 8; }
+    { cJSON *v = cJSON_GetObjectItem(obj, "cxt");
+      out.can_ext = cJSON_IsTrue(v); }
 
     return true;
 }

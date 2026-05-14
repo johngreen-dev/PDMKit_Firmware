@@ -109,6 +109,13 @@ struct IORule {
     bool     invert    = false;   // invert logic output (NOT, NAND_NOR, THRESHOLD below, WINDOW out-of-window)
 
     std::string expr;  // EXPR: the boolean expression text
+
+    // CAN fields (only set for CAN_* rule types)
+    uint32_t can_id   = 0;    // CAN message ID (11-bit standard or 29-bit extended)
+    uint8_t  can_byte = 0;    // byte offset in CAN data frame (0-7)
+    uint8_t  can_bit  = 0;    // bit offset within byte, LSB-first (0-7)
+    uint8_t  can_len  = 8;    // signal bit width (1-32)
+    bool     can_ext  = false; // true = 29-bit extended ID
 };
 
 // ---------------------------------------------------------------------------
