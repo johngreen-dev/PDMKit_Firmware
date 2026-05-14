@@ -1,4 +1,5 @@
 #include "io_config.hpp"
+#include "io_rules.hpp"
 #include "gpio.hpp"
 #include "cJSON.h"
 #include "esp_log.h"
@@ -16,8 +17,10 @@ IOConfigManager &IOConfigManager::instance()
     return s;
 }
 
-void IOConfigManager::clearPins()  { _pins.clear(); }
-void IOConfigManager::clearRules() { _rules.clear(); }
+void IOConfigManager::clearPins()   { _pins.clear(); }
+void IOConfigManager::clearRules()  { _rules.clear(); }
+void IOConfigManager::clearVars()   { _vars.clear(); }
+void IOConfigManager::clearGroups() { _groups.clear(); }
 
 // ---------------------------------------------------------------------------
 // Serialisation helpers — pins
@@ -57,31 +60,6 @@ static int parsePull(const char *s)
     if (strcmp(s, "up")   == 0) return 1;
     if (strcmp(s, "down") == 0) return 2;
     return 0;
-}
-
-// ---------------------------------------------------------------------------
-// Serialisation helpers — rules
-// ---------------------------------------------------------------------------
-
-static const char *ruleTypeStr(RuleType t)
-{
-    switch (t) {
-        case RuleType::LINK:    return "link";
-        case RuleType::TOGGLE:  return "toggle";
-        case RuleType::ADC_PWM: return "adc_pwm";
-        case RuleType::FLASH:   return "flash";
-    }
-    return "link";
-}
-
-static bool parseRuleType(const char *s, RuleType &out)
-{
-    if (!s) return false;
-    if (strcmp(s, "link")    == 0) { out = RuleType::LINK;    return true; }
-    if (strcmp(s, "toggle")  == 0) { out = RuleType::TOGGLE;  return true; }
-    if (strcmp(s, "adc_pwm") == 0) { out = RuleType::ADC_PWM; return true; }
-    if (strcmp(s, "flash")   == 0) { out = RuleType::FLASH;   return true; }
-    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -165,25 +143,40 @@ esp_err_t IOConfigManager::load()
     cJSON *rules_arr = cJSON_GetObjectItem(root, "rules");
     cJSON_ArrayForEach(item, rules_arr) {
         IORule r;
-        cJSON *t = cJSON_GetObjectItem(item, "t");
-        if (!cJSON_IsString(t)) continue;
-        if (!parseRuleType(t->valuestring, r.type)) continue;
+        if (ruleFromJson(item, r)) _rules.push_back(r);
+    }
 
-        cJSON *src = cJSON_GetObjectItem(item, "src");
-        cJSON *dst = cJSON_GetObjectItem(item, "dst");
-        cJSON *on  = cJSON_GetObjectItem(item, "on");
-        cJSON *off = cJSON_GetObjectItem(item, "off");
+    // --- vars ---
+    _vars.clear();
+    cJSON *vars_arr = cJSON_GetObjectItem(root, "vars");
+    cJSON_ArrayForEach(item, vars_arr) {
+        IOVar v;
+        cJSON *vn = cJSON_GetObjectItem(item, "name");
+        cJSON *ve = cJSON_GetObjectItem(item, "expr");
+        if (!cJSON_IsString(vn) || !cJSON_IsString(ve)) continue;
+        v.name = vn->valuestring;
+        v.expr = ve->valuestring;
+        _vars.push_back(v);
+    }
 
-        if (cJSON_IsString(src)) r.src    = src->valuestring;
-        if (cJSON_IsString(dst)) r.dst    = dst->valuestring;
-        if (cJSON_IsNumber(on))  r.on_ms  = (uint32_t)on->valuedouble;
-        if (cJSON_IsNumber(off)) r.off_ms = (uint32_t)off->valuedouble;
-
-        _rules.push_back(r);
+    // --- groups ---
+    _groups.clear();
+    cJSON *groups_arr = cJSON_GetObjectItem(root, "groups");
+    cJSON_ArrayForEach(item, groups_arr) {
+        IOGroup g;
+        cJSON *gn = cJSON_GetObjectItem(item, "name");
+        cJSON *gm = cJSON_GetObjectItem(item, "members");
+        if (!cJSON_IsString(gn) || !cJSON_IsArray(gm)) continue;
+        g.name = gn->valuestring;
+        cJSON *mem;
+        cJSON_ArrayForEach(mem, gm)
+            if (cJSON_IsString(mem)) g.members.push_back(mem->valuestring);
+        _groups.push_back(g);
     }
 
     cJSON_Delete(root);
-    ESP_LOGI(TAG, "loaded %d pin(s), %d rule(s)", (int)_pins.size(), (int)_rules.size());
+    ESP_LOGI(TAG, "loaded %d pin(s), %d rule(s), %d var(s), %d group(s)",
+             (int)_pins.size(), (int)_rules.size(), (int)_vars.size(), (int)_groups.size());
     return ESP_OK;
 }
 
@@ -216,16 +209,28 @@ esp_err_t IOConfigManager::save()
         cJSON_AddItemToArray(pins_arr, obj);
     }
 
-    for (const auto &r : _rules) {
+    for (const auto &r : _rules)
+        cJSON_AddItemToArray(rules_arr, ruleToJson(r));
+
+    cJSON *vars_arr2 = cJSON_CreateArray();
+    cJSON_AddItemToObject(root, "vars", vars_arr2);
+    for (const auto &v : _vars) {
         cJSON *obj = cJSON_CreateObject();
-        cJSON_AddStringToObject(obj, "t", ruleTypeStr(r.type));
-        if (!r.src.empty()) cJSON_AddStringToObject(obj, "src", r.src.c_str());
-        if (!r.dst.empty()) cJSON_AddStringToObject(obj, "dst", r.dst.c_str());
-        if (r.type == RuleType::FLASH) {
-            cJSON_AddNumberToObject(obj, "on",  (double)r.on_ms);
-            cJSON_AddNumberToObject(obj, "off", (double)r.off_ms);
-        }
-        cJSON_AddItemToArray(rules_arr, obj);
+        cJSON_AddStringToObject(obj, "name", v.name.c_str());
+        cJSON_AddStringToObject(obj, "expr", v.expr.c_str());
+        cJSON_AddItemToArray(vars_arr2, obj);
+    }
+
+    cJSON *grp_arr = cJSON_CreateArray();
+    cJSON_AddItemToObject(root, "groups", grp_arr);
+    for (const auto &g : _groups) {
+        cJSON *obj = cJSON_CreateObject();
+        cJSON_AddStringToObject(obj, "name", g.name.c_str());
+        cJSON *mem_arr = cJSON_CreateArray();
+        for (const auto &m : g.members)
+            cJSON_AddItemToArray(mem_arr, cJSON_CreateString(m.c_str()));
+        cJSON_AddItemToObject(obj, "members", mem_arr);
+        cJSON_AddItemToArray(grp_arr, obj);
     }
 
     char *str = cJSON_PrintUnformatted(root);
@@ -235,7 +240,8 @@ esp_err_t IOConfigManager::save()
     esp_err_t err = nvsPutStr(NVS_KEY, str);
     cJSON_free(str);
     if (err == ESP_OK)
-        ESP_LOGI(TAG, "saved %d pin(s), %d rule(s)", (int)_pins.size(), (int)_rules.size());
+        ESP_LOGI(TAG, "saved %d pin(s), %d rule(s), %d var(s), %d group(s)",
+                 (int)_pins.size(), (int)_rules.size(), (int)_vars.size(), (int)_groups.size());
     else
         ESP_LOGW(TAG, "save failed: %s", esp_err_to_name(err));
     return err;
@@ -317,4 +323,55 @@ esp_err_t IOConfigManager::removeRule(size_t index)
     if (index >= _rules.size()) return ESP_ERR_NOT_FOUND;
     _rules.erase(_rules.begin() + index);
     return ESP_OK;
+}
+
+// ---------------------------------------------------------------------------
+// Var CRUD
+// ---------------------------------------------------------------------------
+
+esp_err_t IOConfigManager::addVar(const IOVar &v)
+{
+    for (auto &existing : _vars) {
+        if (existing.name == v.name) { existing = v; return ESP_OK; }
+    }
+    _vars.push_back(v);
+    return ESP_OK;
+}
+
+esp_err_t IOConfigManager::removeVar(const char *name)
+{
+    auto it = std::find_if(_vars.begin(), _vars.end(),
+                           [name](const IOVar &v) { return v.name == name; });
+    if (it == _vars.end()) return ESP_ERR_NOT_FOUND;
+    _vars.erase(it);
+    return ESP_OK;
+}
+
+// ---------------------------------------------------------------------------
+// Group CRUD
+// ---------------------------------------------------------------------------
+
+esp_err_t IOConfigManager::addGroup(const IOGroup &g)
+{
+    for (auto &existing : _groups) {
+        if (existing.name == g.name) { existing = g; return ESP_OK; }
+    }
+    _groups.push_back(g);
+    return ESP_OK;
+}
+
+esp_err_t IOConfigManager::removeGroup(const char *name)
+{
+    auto it = std::find_if(_groups.begin(), _groups.end(),
+                           [name](const IOGroup &g) { return g.name == name; });
+    if (it == _groups.end()) return ESP_ERR_NOT_FOUND;
+    _groups.erase(it);
+    return ESP_OK;
+}
+
+const IOGroup *IOConfigManager::findGroup(const char *name) const
+{
+    for (const auto &g : _groups)
+        if (g.name == name) return &g;
+    return nullptr;
 }

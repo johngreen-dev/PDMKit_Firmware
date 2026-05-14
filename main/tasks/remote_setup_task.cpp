@@ -1,6 +1,7 @@
 #include "remote_setup_task.hpp"
 #include "io_config.hpp"
 #include "gpio.hpp"
+#include "expr.hpp"
 #include "main_controller.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -12,6 +13,7 @@
 #include "nvs.h"
 #include <cstring>
 #include <cstdio>
+#include <cctype>
 
 static const char *TAG = "remote_setup";
 
@@ -140,6 +142,14 @@ void RemoteSetupTask::handleCommand(const char *cmd)
     else if (strncmp(cmd, "RS_AddRule ",   11)   == 0) onAddRule   (cmd + 11);
     else if (strncmp(cmd, "RS_RemoveRule ",14)   == 0) onRemoveRule(cmd + 14);
     else if (strcmp (cmd, "RS_ListRules")         == 0) onListRules();
+    // Variable config
+    else if (strcmp (cmd, "RS_ListVars")          == 0) onListVars();
+    else if (strncmp(cmd, "RS_AddVar ",    10)   == 0) onAddVar   (cmd + 10);
+    else if (strncmp(cmd, "RS_RemoveVar ", 13)   == 0) onRemoveVar(cmd + 13);
+    // Group config
+    else if (strcmp (cmd, "RS_ListGroups")        == 0) onListGroups();
+    else if (strncmp(cmd, "RS_AddGroup ",  12)   == 0) onAddGroup  (cmd + 12);
+    else if (strncmp(cmd, "RS_RemoveGroup ",16)  == 0) onRemoveGroup(cmd + 16);
     // I/O query / control
     else if (strcmp (cmd, "RS_ListPins")          == 0) onListPins();
     else if (strncmp(cmd, "RS_SetOutput ", 13)   == 0) onSetOutput(cmd + 13);
@@ -303,29 +313,138 @@ void RemoteSetupTask::onAddRule(const char *args)
 {
     if (!_setup_mode) { sendResponse("ERR_NOT_IN_SETUP\n"); return; }
 
-    char type_str[16], arg1[32], arg2[32] = {};
-    uint32_t n1 = 500, n2 = 500;
-    int n = sscanf(args, "%15s %31s %31s %lu %lu", type_str, arg1, arg2, &n1, &n2);
-    if (n < 2) { sendResponse("ERR_BAD_ARGS\n"); return; }
+    // Extract the type token first
+    char type_str[16] = {};
+    const char *p = args;
+    int i = 0;
+    while (*p && !isspace((unsigned char)*p) && i < 15) type_str[i++] = *p++;
+    while (*p &&  isspace((unsigned char)*p)) p++;
 
     IORule r;
-    if      (strcmp(type_str, "link")    == 0) r.type = RuleType::LINK;
-    else if (strcmp(type_str, "toggle")  == 0) r.type = RuleType::TOGGLE;
-    else if (strcmp(type_str, "adc_pwm") == 0) r.type = RuleType::ADC_PWM;
-    else if (strcmp(type_str, "flash")   == 0) r.type = RuleType::FLASH;
-    else { sendResponse("ERR_BAD_ARGS\n"); return; }
+    if (!parseRuleType(type_str, r.type)) { sendResponse("ERR_BAD_ARGS\n"); return; }
 
-    if (r.type == RuleType::FLASH) {
-        // RS_AddRule flash <dst> <on_ms> <off_ms>
-        if (n < 4) { sendResponse("ERR_BAD_ARGS\n"); return; }
-        r.dst    = arg1;
-        r.on_ms  = n1;
-        r.off_ms = n2;
-    } else {
-        // RS_AddRule link|toggle|adc_pwm <src> <dst>
-        if (n < 3) { sendResponse("ERR_BAD_ARGS\n"); return; }
-        r.src = arg1;
-        r.dst = arg2;
+    // --- EXPR: <dst> <expression text...> ---
+    if (r.type == RuleType::EXPR) {
+        char dst[32] = {};
+        int j = 0;
+        while (*p && !isspace((unsigned char)*p) && j < 31) dst[j++] = *p++;
+        while (*p &&  isspace((unsigned char)*p)) p++;
+        if (!dst[0] || !*p) { sendResponse("ERR_BAD_ARGS\n"); return; }
+        std::string err;
+        if (!parseExpr(p, err)) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "ERR_BAD_EXPR %s\n", err.c_str());
+            sendResponse(msg);
+            return;
+        }
+        r.dst  = dst;
+        r.expr = p;
+        IOConfigManager::instance().addRule(r);
+        sendResponse("OK_AddRule\n");
+        return;
+    }
+
+    // --- All other rule types: use sscanf on the remainder ---
+    char arg1[32] = {}, arg2[32] = {};
+    uint32_t n1 = 0, n2 = 0;
+    int n = sscanf(p, "%31s %31s %lu %lu", arg1, arg2, &n1, &n2);
+    if (n < 1) { sendResponse("ERR_BAD_ARGS\n"); return; }
+
+    // Adjust n to account for how many we actually parsed (type already consumed)
+    // n here is args parsed from remainder: arg1, arg2, n1, n2
+
+    // n counts tokens in remainder: arg1(1) arg2(2) n1(3) n2(4)
+    switch (r.type) {
+        // --- Oscillators: RS_AddRule <type> <dst> <n1> <n2> ---
+        case RuleType::FLASHER:
+        case RuleType::HAZARD:
+            if (n < 3) { sendResponse("ERR_BAD_ARGS\n"); return; }
+            r.dst    = arg1;
+            r.on_ms  = n1;
+            r.off_ms = n2;
+            break;
+        case RuleType::BURST:
+            // RS_AddRule burst <dst> <pulse_count> <burst_gap_ms>
+            if (n < 3) { sendResponse("ERR_BAD_ARGS\n"); return; }
+            r.dst     = arg1;
+            r.param_a = n1;
+            r.param_b = n2;
+            break;
+        case RuleType::PWM_OUT:
+            // RS_AddRule pwm_out <dst> <freq_hz> <duty_pct>
+            if (n < 3) { sendResponse("ERR_BAD_ARGS\n"); return; }
+            r.dst     = arg1;
+            r.param_a = n1;
+            r.param_b = n2;
+            break;
+
+        // --- Two-named-input: arg1 encodes "pin1/pin2" ---
+        case RuleType::SR_LATCH:
+        case RuleType::XOR: {
+            // RS_AddRule sr_latch|xor <set_pin>/<reset_pin> <dst>
+            if (n < 2) { sendResponse("ERR_BAD_ARGS\n"); return; }
+            char *slash = strchr(arg1, '/');
+            if (slash) { *slash = '\0'; r.src2 = slash + 1; }
+            r.srcs.push_back(arg1);
+            r.dst = arg2;
+            break;
+        }
+
+        // --- All other rules: RS_AddRule <type> <src> <dst> [n1] [n2] ---
+        default: {
+            if (n < 2) { sendResponse("ERR_BAD_ARGS\n"); return; }
+            r.srcs.push_back(arg1);
+            r.dst = arg2;
+
+            // NOT always inverts; no extra params needed
+            if (r.type == RuleType::NOT) { r.invert = true; break; }
+
+            // Map n1/n2 to the correct IORule fields per type
+            switch (r.type) {
+                case RuleType::DIRECT:
+                case RuleType::NAND_NOR:
+                    r.invert = (n1 != 0);
+                    break;
+                case RuleType::ON_DELAY:
+                case RuleType::OFF_DELAY:
+                case RuleType::DEBOUNCE:
+                    r.delay_ms = n1;
+                    break;
+                case RuleType::MIN_ON:
+                case RuleType::ONE_SHOT:
+                case RuleType::PULSE_STR:
+                    r.on_ms = n1;
+                    break;
+                case RuleType::THRESHOLD:
+                    r.thresh_lo = (int32_t)n1;
+                    r.invert    = (n2 != 0);
+                    break;
+                case RuleType::HYSTERESIS:
+                case RuleType::WINDOW:
+                case RuleType::ADC_MAP:
+                case RuleType::THERM_DRT:
+                    r.thresh_lo = (int32_t)n1;
+                    r.thresh_hi = (int32_t)n2;
+                    break;
+                case RuleType::N_PRESS:
+                    r.param_a   = n1;
+                    r.window_ms = n2;
+                    break;
+                case RuleType::OC_LATCH:
+                    r.thresh_lo = (int32_t)n1;
+                    r.delay_ms  = n2;
+                    break;
+                case RuleType::RETRY:
+                    r.param_a = n1;
+                    r.param_b = n2;
+                    break;
+                case RuleType::WATCHDOG:
+                    r.window_ms = n1;
+                    break;
+                default: break;
+            }
+            break;
+        }
     }
 
     IOConfigManager::instance().addRule(r);
@@ -349,18 +468,20 @@ void RemoteSetupTask::onListRules()
     const auto &rules = IOConfigManager::instance().rules();
     for (size_t i = 0; i < rules.size(); i++) {
         const IORule &r = rules[i];
-        char line[96];
-        if (r.type == RuleType::FLASH) {
-            snprintf(line, sizeof(line), "%d:flash:%s:%lums/%lums\n",
-                     (int)i, r.dst.c_str(),
-                     (unsigned long)r.on_ms, (unsigned long)r.off_ms);
+        if (r.type == RuleType::EXPR) {
+            char hdr[32], tail[64];
+            snprintf(hdr,  sizeof(hdr),  "%d:expr:", (int)i);
+            snprintf(tail, sizeof(tail), "->%s\n", r.dst.c_str());
+            sendResponse(hdr);
+            sendResponse(r.expr.c_str());
+            sendResponse(tail);
         } else {
-            const char *ts = (r.type == RuleType::TOGGLE)  ? "toggle"  :
-                             (r.type == RuleType::ADC_PWM) ? "adc_pwm" : "link";
+            char line[96];
+            const char *s0 = r.srcs.empty() ? "" : r.srcs[0].c_str();
             snprintf(line, sizeof(line), "%d:%s:%s->%s\n",
-                     (int)i, ts, r.src.c_str(), r.dst.c_str());
+                     (int)i, ruleTypeStr(r.type), s0, r.dst.c_str());
+            sendResponse(line);
         }
-        sendResponse(line);
     }
     sendResponse("RULES_END\n");
 }
@@ -418,6 +539,99 @@ void RemoteSetupTask::onGetInput(const char *args)
     } else {
         sendResponse("ERR_PIN_NOT_FOUND\n");
     }
+}
+
+// --- Variable config ---
+
+void RemoteSetupTask::onListVars()
+{
+    sendResponse("VARS_BEGIN\n");
+    for (const auto &v : IOConfigManager::instance().vars()) {
+        char line[256];
+        snprintf(line, sizeof(line), "%s:%s\n", v.name.c_str(), v.expr.c_str());
+        sendResponse(line);
+    }
+    sendResponse("VARS_END\n");
+}
+
+void RemoteSetupTask::onAddVar(const char *args)
+{
+    if (!_setup_mode) { sendResponse("ERR_NOT_IN_SETUP\n"); return; }
+    const char *p = args;
+    char name[32] = {};
+    int i = 0;
+    while (*p && !isspace((unsigned char)*p) && i < 31) name[i++] = *p++;
+    while (*p &&  isspace((unsigned char)*p)) p++;
+    if (!name[0] || !*p) { sendResponse("ERR_BAD_ARGS\n"); return; }
+    std::string err;
+    if (!parseExpr(p, err)) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "ERR_BAD_EXPR %s\n", err.c_str());
+        sendResponse(msg);
+        return;
+    }
+    IOVar v; v.name = name; v.expr = p;
+    IOConfigManager::instance().addVar(v);
+    sendResponse("OK_AddVar\n");
+}
+
+void RemoteSetupTask::onRemoveVar(const char *args)
+{
+    if (!_setup_mode) { sendResponse("ERR_NOT_IN_SETUP\n"); return; }
+    char name[32] = {};
+    sscanf(args, "%31s", name);
+    esp_err_t e = IOConfigManager::instance().removeVar(name);
+    sendResponse(e == ESP_OK ? "OK_RemoveVar\n" : "ERR_NOT_FOUND\n");
+}
+
+// --- Group config ---
+
+void RemoteSetupTask::onListGroups()
+{
+    sendResponse("GROUPS_BEGIN\n");
+    for (const auto &g : IOConfigManager::instance().groups()) {
+        char line[256];
+        std::string members;
+        for (size_t i = 0; i < g.members.size(); i++) {
+            if (i) members += ",";
+            members += g.members[i];
+        }
+        snprintf(line, sizeof(line), "%s:%s\n", g.name.c_str(), members.c_str());
+        sendResponse(line);
+    }
+    sendResponse("GROUPS_END\n");
+}
+
+void RemoteSetupTask::onAddGroup(const char *args)
+{
+    if (!_setup_mode) { sendResponse("ERR_NOT_IN_SETUP\n"); return; }
+    const char *p = args;
+    char name[32] = {};
+    int i = 0;
+    while (*p && !isspace((unsigned char)*p) && i < 31) name[i++] = *p++;
+    while (*p &&  isspace((unsigned char)*p)) p++;
+    if (!name[0] || !*p) { sendResponse("ERR_BAD_ARGS\n"); return; }
+    IOGroup g; g.name = name;
+    while (*p) {
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (!*p) break;
+        char mem[32] = {};
+        int j = 0;
+        while (*p && !isspace((unsigned char)*p) && j < 31) mem[j++] = *p++;
+        if (mem[0]) g.members.push_back(mem);
+    }
+    if (g.members.empty()) { sendResponse("ERR_BAD_ARGS\n"); return; }
+    IOConfigManager::instance().addGroup(g);
+    sendResponse("OK_AddGroup\n");
+}
+
+void RemoteSetupTask::onRemoveGroup(const char *args)
+{
+    if (!_setup_mode) { sendResponse("ERR_NOT_IN_SETUP\n"); return; }
+    char name[32] = {};
+    sscanf(args, "%31s", name);
+    esp_err_t e = IOConfigManager::instance().removeGroup(name);
+    sendResponse(e == ESP_OK ? "OK_RemoveGroup\n" : "ERR_NOT_FOUND\n");
 }
 
 void RemoteSetupTask::sendResponse(const char *msg)

@@ -36,6 +36,16 @@ private:
     void onRemoveRule(const char *args);  // <index>
     void onListRules ();
 
+    // Variable config (require setup mode)
+    void onAddVar   (const char *args);  // <name> <expr...>
+    void onRemoveVar(const char *args);  // <name>
+    void onListVars ();
+
+    // Group config (require setup mode)
+    void onAddGroup   (const char *args);  // <name> <m1> [m2...]
+    void onRemoveGroup(const char *args);  // <name>
+    void onListGroups ();
+
     // I/O query / control (work outside setup mode too)
     void onListPins ();
     void onSetOutput(const char *args);  // <name> <0|1>
@@ -44,7 +54,7 @@ private:
     void sendResponse(const char *msg);
 
     bool          _setup_mode      = false;
-    char          _line_buf[128]   = {};
+    char          _line_buf[512]   = {};
     int           _line_len        = 0;
     QueueHandle_t _rx_queue        = nullptr;
 };
