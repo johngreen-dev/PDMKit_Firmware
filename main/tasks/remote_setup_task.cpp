@@ -5,6 +5,7 @@
 #include "main_controller.hpp"
 #include "io_rules.hpp"
 #include "can_task.hpp"
+#include "board_pins.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -152,6 +153,8 @@ void RemoteSetupTask::handleCommand(const char *cmd)
     else if (strcmp (cmd, "RS_ListGroups")        == 0) onListGroups();
     else if (strncmp(cmd, "RS_AddGroup ",  12)   == 0) onAddGroup  (cmd + 12);
     else if (strncmp(cmd, "RS_RemoveGroup ",16)  == 0) onRemoveGroup(cmd + 16);
+    // Board pin map
+    else if (strcmp (cmd, "RS_ListBoardPins")      == 0) onListBoardPins();
     // I/O query / control
     else if (strcmp (cmd, "RS_ListPins")          == 0) onListPins();
     else if (strncmp(cmd, "RS_SetOutput ", 13)   == 0) onSetOutput(cmd + 13);
@@ -226,11 +229,8 @@ void RemoteSetupTask::onGetStorage()
                 nvs_get_str(h, info.key, nullptr, &len);
                 char *val = new char[len]();
                 nvs_get_str(h, info.key, val, &len);
-                char hdr[48];
-                snprintf(hdr, sizeof(hdr), "%s:str:", info.key);
-                sendResponse(hdr);
-                sendResponse(val);
-                sendResponse("\n");
+                std::string str_line = std::string(info.key) + ":str:" + val + "\n";
+                sendResponse(str_line.c_str());
                 delete[] val;
                 line[0] = '\0';
                 break;
@@ -254,11 +254,13 @@ void RemoteSetupTask::onGetStorage()
 void RemoteSetupTask::onAddOutput(const char *args)
 {
     if (!_setup_mode) { sendResponse("ERR_NOT_IN_SETUP\n"); return; }
-    char name[32]; int gpio;
-    if (sscanf(args, "%31s %d", name, &gpio) != 2) {
+    char name[32], gpio_str[32];
+    if (sscanf(args, "%31s %31s", name, gpio_str) != 2) {
         sendResponse("ERR_BAD_ARGS\n"); return;
     }
-    IOPin p; p.name = name; p.type = PinType::OUTPUT; p.gpio = (gpio_num_t)gpio;
+    gpio_num_t gpio = resolveGpio(gpio_str);
+    if (gpio == GPIO_NUM_NC) { sendResponse("ERR_BAD_ARGS\n"); return; }
+    IOPin p; p.name = name; p.type = PinType::OUTPUT; p.gpio = gpio;
     IOConfigManager::instance().addPin(p);
     sendResponse("OK_AddOutput\n");
 }
@@ -266,11 +268,13 @@ void RemoteSetupTask::onAddOutput(const char *args)
 void RemoteSetupTask::onAddInput(const char *args)
 {
     if (!_setup_mode) { sendResponse("ERR_NOT_IN_SETUP\n"); return; }
-    char name[32]; int gpio; char pull[8] = "none";
-    if (sscanf(args, "%31s %d %7s", name, &gpio, pull) < 2) {
+    char name[32], gpio_str[32]; char pull[8] = "none";
+    if (sscanf(args, "%31s %31s %7s", name, gpio_str, pull) < 2) {
         sendResponse("ERR_BAD_ARGS\n"); return;
     }
-    IOPin p; p.name = name; p.type = PinType::INPUT; p.gpio = (gpio_num_t)gpio;
+    gpio_num_t gpio = resolveGpio(gpio_str);
+    if (gpio == GPIO_NUM_NC) { sendResponse("ERR_BAD_ARGS\n"); return; }
+    IOPin p; p.name = name; p.type = PinType::INPUT; p.gpio = gpio;
     if      (strcmp(pull, "up")   == 0) p.pull = 1;
     else if (strcmp(pull, "down") == 0) p.pull = 2;
     IOConfigManager::instance().addPin(p);
@@ -280,9 +284,16 @@ void RemoteSetupTask::onAddInput(const char *args)
 void RemoteSetupTask::onAddADC(const char *args)
 {
     if (!_setup_mode) { sendResponse("ERR_NOT_IN_SETUP\n"); return; }
-    char name[32]; int unit, ch;
-    if (sscanf(args, "%31s %d %d", name, &unit, &ch) != 3) {
-        sendResponse("ERR_BAD_ARGS\n"); return;
+    char name[32], arg2[32], arg3[32] = {};
+    int n = sscanf(args, "%31s %31s %31s", name, arg2, arg3);
+    if (n < 2) { sendResponse("ERR_BAD_ARGS\n"); return; }
+    int unit = 0, ch = 0;
+    if (n == 2) {
+        // second arg must be a board pin label with ADC capability
+        if (!resolveAdc(arg2, unit, ch)) { sendResponse("ERR_BAD_ARGS\n"); return; }
+    } else {
+        unit = atoi(arg2);
+        ch   = atoi(arg3);
     }
     IOPin p; p.name = name; p.type = PinType::ADC; p.adcUnit = unit; p.adcCh = ch;
     IOConfigManager::instance().addPin(p);
@@ -292,12 +303,14 @@ void RemoteSetupTask::onAddADC(const char *args)
 void RemoteSetupTask::onAddPWM(const char *args)
 {
     if (!_setup_mode) { sendResponse("ERR_NOT_IN_SETUP\n"); return; }
-    char name[32]; int gpio; int freq = 5000;
-    if (sscanf(args, "%31s %d %d", name, &gpio, &freq) < 2) {
+    char name[32], gpio_str[32]; int freq = 5000;
+    if (sscanf(args, "%31s %31s %d", name, gpio_str, &freq) < 2) {
         sendResponse("ERR_BAD_ARGS\n"); return;
     }
+    gpio_num_t gpio = resolveGpio(gpio_str);
+    if (gpio == GPIO_NUM_NC) { sendResponse("ERR_BAD_ARGS\n"); return; }
     IOPin p; p.name = name; p.type = PinType::PWM;
-    p.gpio = (gpio_num_t)gpio; p.freq = (uint32_t)freq;
+    p.gpio = gpio; p.freq = (uint32_t)freq;
     IOConfigManager::instance().addPin(p);
     sendResponse("OK_AddPWM\n");
 }
@@ -638,12 +651,8 @@ void RemoteSetupTask::onListRules()
     for (size_t i = 0; i < rules.size(); i++) {
         const IORule &r = rules[i];
         if (r.type == RuleType::EXPR) {
-            char hdr[32], tail[64];
-            snprintf(hdr,  sizeof(hdr),  "%d:expr:", (int)i);
-            snprintf(tail, sizeof(tail), "->%s\n", r.dst.c_str());
-            sendResponse(hdr);
-            sendResponse(r.expr.c_str());
-            sendResponse(tail);
+            std::string line_str = std::to_string(i) + ":expr:" + r.expr + "->" + r.dst + "\n";
+            sendResponse(line_str.c_str());
         } else {
             char line[96];
             const char *s0 = r.srcs.empty() ? "" : r.srcs[0].c_str();
@@ -653,6 +662,29 @@ void RemoteSetupTask::onListRules()
         }
     }
     sendResponse("RULES_END\n");
+}
+
+// --- Board pin map ---
+
+void RemoteSetupTask::onListBoardPins()
+{
+    sendResponse("BOARD_PINS_BEGIN\n");
+    for (int i = 0; i < BOARD_PIN_COUNT; i++) {
+        const BoardPinDef &p = BOARD_PIN_TABLE[i];
+        char line[80];
+        bool has_gpio = (p.gpio != GPIO_NUM_NC);
+        bool has_adc  = (p.adc_unit >= 0);
+        if (has_gpio && has_adc)
+            snprintf(line, sizeof(line), "%s:gpio%d:adc%d_ch%d\n",
+                     p.label, (int)p.gpio, p.adc_unit, p.adc_ch);
+        else if (has_gpio)
+            snprintf(line, sizeof(line), "%s:gpio%d\n", p.label, (int)p.gpio);
+        else
+            snprintf(line, sizeof(line), "%s:adc%d_ch%d\n",
+                     p.label, p.adc_unit, p.adc_ch);
+        sendResponse(line);
+    }
+    sendResponse("BOARD_PINS_END\n");
 }
 
 // --- I/O query / control ---

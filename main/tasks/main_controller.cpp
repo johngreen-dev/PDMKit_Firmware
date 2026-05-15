@@ -374,13 +374,21 @@ static void evalTick(
         // ADC pins: leave as false in sig (read via readMv inside computeRule)
     }
 
-    // 2. Evaluate variables -> add to sig
+    // 2. Compute group signals from member states (so groups can be used as inputs)
+    for (const auto &grp : io.groups()) {
+        bool any = false;
+        for (const auto &m : grp.members)
+            any = any || sigGet(sig, m);
+        sig[grp.name] = any;
+    }
+
+    // 3. Evaluate variables -> add to sig
     for (auto &vs : varStates) {
         if (vs.ast)
             sig[vs.name] = vs.ast->eval(sig);
     }
 
-    // 3. For each rule, compute claimed value and accumulate into claims map
+    // 4. For each rule, compute claimed value and accumulate into claims map
     //    For rules with group dsts, expand the group.
     std::map<std::string, bool> claims;
 
@@ -428,7 +436,7 @@ static void evalTick(
         }
     }
 
-    // 4. Apply claims: update sig and drive physical pins (skip group names)
+    // 5. Apply claims: update sig and drive physical pins (skip group names)
     for (const auto &kv : claims) {
         if (io.findGroup(kv.first.c_str())) continue;
         sig[kv.first] = kv.second;

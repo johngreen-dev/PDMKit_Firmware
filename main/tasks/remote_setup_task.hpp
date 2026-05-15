@@ -46,6 +46,9 @@ private:
     void onRemoveGroup(const char *args);  // <name>
     void onListGroups ();
 
+    // Board pin map query (works outside setup mode)
+    void onListBoardPins();
+
     // I/O query / control (work outside setup mode too)
     void onListPins ();
     void onSetOutput(const char *args);  // <name> <0|1>
