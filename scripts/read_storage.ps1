@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 param(
-    [string]$Port = "COM6",
+    [string]$Port = "COM11",
     [string]$OutputDir = "storage_dump"
 )
 $ErrorActionPreference = "Stop"

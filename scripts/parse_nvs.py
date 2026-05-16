@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """Parse an ESP-IDF NVS partition binary and print all key-value entries."""
 
+import json
 import os
+import shutil
 import struct
+import subprocess
 import sys
+
+NVS_ADDR = "0x9000"
+NVS_SIZE  = "0x6000"
 
 PAGE_SIZE        = 4096
 HEADER_SIZE      = 32
@@ -128,15 +134,55 @@ def parse(path: str) -> list:
     return rows
 
 
+def _find_esptool() -> list:
+    exe = shutil.which("esptool") or shutil.which("esptool.exe")
+    if exe:
+        return [exe]
+    for candidate in (sys.executable, "python", "python3"):
+        if shutil.which(candidate):
+            return [candidate, "-m", "esptool"]
+    return [sys.executable, "-m", "esptool"]
+
+
+def read_storage(port: str, out_path: str) -> None:
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    cmd = _find_esptool() + ["--port", port, "--baud", "921600",
+                              "read_flash", NVS_ADDR, NVS_SIZE, out_path]
+    print(f"Reading NVS from {port} …")
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        print("esptool failed — aborting.")
+        sys.exit(result.returncode)
+    print(f"Saved to {out_path}\n")
+
+
+def _format_value(typ: str, val) -> str:
+    if typ == "str":
+        try:
+            parsed = json.loads(val)
+            return json.dumps(parsed, indent=2)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return str(val)
+
+
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+    import argparse
+    ap = argparse.ArgumentParser(description="Parse ESP-IDF NVS partition binary.")
+    ap.add_argument("--port", metavar="COM", help="Serial port — reads flash before parsing")
+    ap.add_argument("file", nargs="?", default=os.path.join(
         os.path.dirname(__file__), "..", "storage_dump", "nvs.bin"
-    )
-    if not os.path.exists(path):
-        print(f"File not found: {path}")
+    ))
+    args = ap.parse_args()
+
+    if args.port:
+        read_storage(args.port, args.file)
+
+    if not os.path.exists(args.file):
+        print(f"File not found: {args.file}")
         sys.exit(1)
 
-    rows = parse(path)
+    rows = parse(args.file)
     if not rows:
         print("No NVS entries found (partition is empty or unrecognised format).")
         return
@@ -146,7 +192,14 @@ def main():
     print("\n" + header)
     print("-" * 72)
     for ns, key, typ, val in rows:
-        print(f"{ns:<{col['ns']}} {key:<{col['key']}} {typ:<{col['type']}} {val}")
+        formatted = _format_value(typ, val)
+        lines = formatted.splitlines()
+        if len(lines) == 1:
+            print(f"{ns:<{col['ns']}} {key:<{col['key']}} {typ:<{col['type']}} {lines[0]}")
+        else:
+            print(f"{ns:<{col['ns']}} {key:<{col['key']}} {typ:<{col['type']}}")
+            for line in lines:
+                print(f"  {line}")
     print()
 
 

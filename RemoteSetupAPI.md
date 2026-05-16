@@ -528,9 +528,10 @@ CAN IDs may be decimal (`512`) or `0x`-prefixed hex (`0x200`).
 ```
 RS_AddRule expr LED1 SW1 AND NOT SW2
 RS_AddRule expr ALL_LIGHTS (SW1 OR SW2) AND ENABLED
+RS_AddRule expr FAULT_OUT SW1 XOR SW2
 ```
 
-Expression operators: `AND`, `OR`, `NOT` (case-insensitive), parentheses. Operands are pin names, variable names, or group names.
+Expression operators: `AND`, `OR`, `XOR`, `NOT` (case-insensitive), parentheses. Operands are pin names, variable names, or group names.
 
 ---
 
@@ -793,10 +794,11 @@ Understanding how the firmware evaluates rules helps design correct logic config
 ### Expression syntax
 
 ```
-expr := term (OR term)*
-term := factor (AND factor)*
+expr   := xorExpr (OR xorExpr)*
+xorExpr := term (XOR term)*
+term   := factor (AND factor)*
 factor := NOT factor | atom
-atom := IDENT | '(' expr ')'
+atom   := IDENT | '(' expr ')'
 ```
 
 Identifiers are **case-sensitive** and must match pin names, variable names, or group names exactly.

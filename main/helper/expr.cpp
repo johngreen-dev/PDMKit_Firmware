@@ -7,7 +7,7 @@
 // Tokenizer
 // ---------------------------------------------------------------------------
 
-enum class TokType { IDENT, KW_AND, KW_OR, KW_NOT, LPAREN, RPAREN, END, ERR };
+enum class TokType { IDENT, KW_AND, KW_OR, KW_NOT, KW_XOR, LPAREN, RPAREN, END, ERR };
 
 struct Token {
     TokType     type;
@@ -45,6 +45,7 @@ struct Lexer {
             if (strcmp(upper, "AND") == 0) return {TokType::KW_AND, word};
             if (strcmp(upper, "OR")  == 0) return {TokType::KW_OR,  word};
             if (strcmp(upper, "NOT") == 0) return {TokType::KW_NOT, word};
+            if (strcmp(upper, "XOR") == 0) return {TokType::KW_XOR, word};
 
             return {TokType::IDENT, word};
         }
@@ -73,6 +74,7 @@ struct Parser {
     explicit Parser(const char *src) : lex(src) {}
 
     std::unique_ptr<ExprNode> parseOr();
+    std::unique_ptr<ExprNode> parseXor();
     std::unique_ptr<ExprNode> parseAnd();
     std::unique_ptr<ExprNode> parseNot();
     std::unique_ptr<ExprNode> parseAtom();
@@ -137,16 +139,36 @@ std::unique_ptr<ExprNode> Parser::parseAnd()
     return left;
 }
 
-std::unique_ptr<ExprNode> Parser::parseOr()
+std::unique_ptr<ExprNode> Parser::parseXor()
 {
     auto left = parseAnd();
     if (failed || !left) return nullptr;
 
     while (true) {
         Token t = lex.peek();
+        if (t.type != TokType::KW_XOR) break;
+        lex.next(); // consume XOR
+        auto right = parseAnd();
+        if (failed || !right) return nullptr;
+        auto node = std::make_unique<ExprNode>();
+        node->op    = ExprNode::Op::XOR;
+        node->left  = std::move(left);
+        node->right = std::move(right);
+        left = std::move(node);
+    }
+    return left;
+}
+
+std::unique_ptr<ExprNode> Parser::parseOr()
+{
+    auto left = parseXor();
+    if (failed || !left) return nullptr;
+
+    while (true) {
+        Token t = lex.peek();
         if (t.type != TokType::KW_OR) break;
         lex.next(); // consume OR
-        auto right = parseAnd();
+        auto right = parseXor();
         if (failed || !right) return nullptr;
         auto node = std::make_unique<ExprNode>();
         node->op    = ExprNode::Op::OR;
@@ -172,6 +194,9 @@ bool ExprNode::eval(const std::map<std::string, bool> &states) const
             return left ? !left->eval(states) : false;
         case Op::AND:
             return (left  ? left->eval(states)  : false) &&
+                   (right ? right->eval(states) : false);
+        case Op::XOR:
+            return (left  ? left->eval(states)  : false) ^
                    (right ? right->eval(states) : false);
         case Op::OR:
             return (left  ? left->eval(states)  : false) ||

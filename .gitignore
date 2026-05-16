@@ -19,3 +19,11 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# Claude Code
+.claude/
+
+# ESP-IDF generated files
+compile_commands.json
+*.orig
